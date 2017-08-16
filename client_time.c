@@ -8,6 +8,8 @@
 #include <pthread.h>
 #include <time.h>
 #include <string.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 #define REQUEST "time"
 #define SERVER_PORT_UDP 7777
@@ -67,22 +69,32 @@
 			} \
 		} \
 
-void* work(void* flag_udp_ptr)
+struct param
+{
+	int flag_udp;
+	long num;
+};
+
+void* work(void* arg)
 {
 	int* ret_value = (int*)malloc(sizeof(int));
 	*ret_value = 0;
-	int sock = socket(AF_INET, (*(int*)flag_udp_ptr)? SOCK_DGRAM : SOCK_STREAM, 0);
+	int sock = socket(AF_INET, (((struct param*)arg)->flag_udp)? SOCK_DGRAM : SOCK_STREAM, 0);
 	if(sock == -1)
+	{
+		printf("%ld", ((struct param*)arg)->num);
 		perror("socket");
+		*ret_value = 1;
+		return ret_value;
+	}
 
 	struct sockaddr_in addr;
 	addr.sin_family = AF_INET;
-	addr.sin_port = htons((*(int*)flag_udp_ptr)? SERVER_PORT_UDP : SERVER_PORT_TCP);
+	addr.sin_port = htons((((struct param*)arg)->flag_udp)? SERVER_PORT_UDP : SERVER_PORT_TCP);
 	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
 	time_t buf = 0;
-
-	if(*(int*)flag_udp_ptr)
+	if(((struct param*)arg)->flag_udp)
 	{	
 		struct sockaddr_in addr_my;
 		addr_my.sin_family = AF_INET;
@@ -90,44 +102,69 @@ void* work(void* flag_udp_ptr)
 		addr_my.sin_addr.s_addr = htonl(INADDR_ANY);
 
 		if(bind(sock,(struct sockaddr*)&addr_my, sizeof(addr_my)) == -1)
+		{
+			printf("%ld", ((struct param*)arg)->num);
 			perror("bind");
+		}
 		GET_TIME(sock, sendto(sock, REQUEST, strlen(REQUEST)+1, 0, (struct sockaddr*)&addr, sizeof(addr)), strlen(REQUEST)+1,
 					recvfrom(sock, &buf, sizeof(buf), 0, NULL, NULL), sizeof(buf), ret_value)
+		struct tm* tim = localtime(&buf);
+		printf("%s\n", asctime(tim));
 	}
 	else
 	{
 		if(connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == -1)
+		{
+			printf("%ld", ((struct param*)arg)->num);
 			perror("conect");
-		GET_TIME(sock, send(sock, REQUEST, strlen(REQUEST)+1, 0), strlen(REQUEST)+1,
-					recv(sock, &buf, sizeof(buf), 0), sizeof(buf), ret_value)
+		}
+		while(1)
+		{
+			GET_TIME(sock, send(sock, REQUEST, strlen(REQUEST)+1, 0), strlen(REQUEST)+1,
+						recv(sock, &buf, sizeof(buf), 0), sizeof(buf), ret_value)
+			struct tm* tim = localtime(&buf);
+			printf("%ld:%s\n", ((struct param*)arg)->num, asctime(tim));
+			sleep(1);
+		}
 	}
 	close(sock);
-	struct tm* tim = localtime(&buf);
-	printf("%s\n", asctime(tim));
 	return ret_value;
 }
 
 
 int main(int argc, char* argv[])
 {
+	{
+		struct rlimit lim;
+
+		// зададим текущий лимит на кол-во открытых дискриптеров
+		lim.rlim_cur = 700000;
+		// зададим максимальный лимит на кол-во открытых дискриптеров
+		lim.rlim_max = 700000;
+
+		// установим указанное кол-во
+		if(setrlimit(RLIMIT_NOFILE, &lim) == -1)
+		{
+			perror("setrlimit");
+		}
+	}
 	int udp = 0;
-	if(argc == 2 && strncmp("-u", argv[1], 2) == 0)
+	if(argc > 1 && strncmp("-u", argv[1], 2) == 0)
 	{
 		udp = 1;
 	}
-	pthread_t thread;
-	pthread_create(&thread, NULL, work, &udp);
-	int* ret;
-	pthread_join(thread, (void**)&ret);
-	if(*ret == 0)
-	{
-		free(ret);
-		return 0;
-	}
-	else
-	{
-		free(ret);
+	if(argc == 1)
 		return 1;
+	long size = atol(argv[argc-1]);
+	pthread_t thread[size];
+	struct param arg[size];
+	for(long i = 0; i < size; ++i)
+	{
+		arg[i].flag_udp = udp;
+		arg[i].num = i;
+		pthread_create(&thread[i], NULL, work, &arg[i]);
 	}
+	for(long i = 0; i < size; ++i)
+		pthread_join(thread[i],NULL);
 	
 }
