@@ -13,28 +13,6 @@
 
 void* sender(void* arg)
 {
-	{
-		char buf[1024];
-		struct sockaddr addr;
-		socklen_t socklen;
-		ssize_t bytes_read = recvfrom(*(((int**)arg)[0]), buf, 1024, 0, &addr, &socklen); 
-		printf("data: %08x %08x %08x %hhd %hhd\n", *(int*)addr.sa_data, *(int*)&addr.sa_data[4], *(int*)&addr.sa_data[8], addr.sa_data[12], addr.sa_data[13]);
-		if(bytes_read <= 0)
-		{
-			perror("recvfrom");
-			return NULL;
-		}
-		if(bytes_read < 4 || strncmp("time", buf, 4) != 0)
-			return NULL;
-		time_t *b = (time_t*) malloc(sizeof(time_t));
-		*b = time(NULL);
-		//printf("port: %hd\n", ntohs(addr.sin_port));
-		if(sendto(*(((int**)arg)[0]), b, sizeof(time_t), 0, &addr, socklen) == -1)
-		{
-			perror("sendto");
-		}
-		free(b);
-	}
 	int efd = epoll_create(5);
 	if(efd < 0)
 		perror("epoll_create");
@@ -70,9 +48,8 @@ void* sender(void* arg)
 				{
 					char buf[1024];
 					struct sockaddr addr;
-					socklen_t socklen;
+					socklen_t socklen = sizeof(addr);
 					ssize_t bytes_read = recvfrom(*(((int**)arg)[0]), buf, 1024, 0, &addr, &socklen); 
-					printf("data: %08x %08x %08x %hhd %hhd\n", *(int*)addr.sa_data, *(int*)&addr.sa_data[4], *(int*)&addr.sa_data[8], addr.sa_data[12], addr.sa_data[13]);
 					if(bytes_read <= 0)
 					{
 						perror("recvfrom");
@@ -82,7 +59,6 @@ void* sender(void* arg)
 						continue;
 					time_t *b = (time_t*) malloc(sizeof(time_t));
 					*b = time(NULL);
-					//printf("port: %hd\n", ntohs(addr.sin_port));
 					if(sendto(*(((int**)arg)[0]), b, sizeof(time_t), 0, &addr, socklen) == -1)
 					{
 						perror("sendto");
