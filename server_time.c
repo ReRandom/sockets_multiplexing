@@ -112,7 +112,7 @@ void* sender(void* arg)
 					if(bytes_read < 4 || strncmp("time", buf, 4) != 0)
 						continue;
 					time_t *b = (time_t*) malloc(sizeof(time_t));
-					*buf = time(NULL);
+					*b = time(NULL);
 					if(send(events[i].data.fd, b, sizeof(time_t), 0) == -1)
 					{
 						perror("send");
@@ -137,14 +137,17 @@ int main(int argc, char* argv[])
 	}
 
 	//Помечаем сокеты неблокируемым
-    //if(fcntl(sock_udp, F_SETFL, O_NONBLOCK) == -1) perror("fcntl");
-    //if(fcntl(sock_tcp, F_SETFL, O_NONBLOCK) == -1) perror("fcntl");
+    if(fcntl(sock_udp, F_SETFL, O_NONBLOCK) == -1) perror("fcntl");
+    if(fcntl(sock_tcp, F_SETFL, O_NONBLOCK) == -1) perror("fcntl");
 
 	struct sockaddr_in addr_udp;
 	addr_udp.sin_family = AF_INET;
 	addr_udp.sin_port = htons(7777);
 	addr_udp.sin_addr.s_addr = htonl(INADDR_ANY);
-	struct sockaddr_in addr_tcp = { AF_INET, htons(7778), htonl(INADDR_ANY)};
+	struct sockaddr_in addr_tcp;
+	addr_tcp.sin_family = AF_INET;
+	addr_tcp.sin_port = htons(7778);
+	addr_tcp.sin_addr.s_addr = htonl(INADDR_ANY);
 
 	if(bind(sock_udp, (struct sockaddr*)&addr_udp, sizeof(addr_udp)) == -1)
 	{
