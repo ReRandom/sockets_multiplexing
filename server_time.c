@@ -17,6 +17,8 @@
 
 #define MSGBUF_NEW_CLIENT_TYPE 		1
 #define MSGBUF_NEED_NEW_THREAD_TYPE 2
+#define MSGBUF_DEL_CLIENT_TYPE		3
+#define MSGBUF_DEL_THREAD_TYPE		4
 
 int tcp_connector_sockfd;
 int udp_sockfd;
@@ -36,39 +38,49 @@ void* worker(void* msqid_ptr)
 	if(efd < 0)
 	{
 		perror("epoll_create thread");
+		struct msgbuf_new_client buf_new_client;
+		buf_new_client.mtype = MSGBUF_DEL_THREAD_TYPE;
+		if(msgsnd(*(int*)msqid_ptr, &buf_new_client, sizeof(buf_new_client)-sizeof(long), 0) == -1)
+			perror("msgsnd thread");
 		return NULL;
 	}
+	int fds[max_fd];
 	struct epoll_event events[max_fd];
-	struct epoll_event* clients = NULL;
 	size_t size_clients = 0;
 	{
 		struct msgbuf_new_client buf;
 		if(msgrcv(*(int*)msqid_ptr, &buf, sizeof(buf)-sizeof(long), MSGBUF_NEW_CLIENT_TYPE, 0) != -1)
 		{
-			clients = (struct epoll_event*)malloc(sizeof(struct epoll_event));
-			clients->events = EPOLLIN;
-			clients->data.fd = buf.fd;
+			struct epoll_event new_event;
+			new_event.events = EPOLLIN;
+			new_event.data.fd = buf.fd;
+			fds[size_clients] = buf.fd;
 			++size_clients;
-			epoll_ctl(efd, EPOLL_CTL_ADD, buf.fd, clients);
+			epoll_ctl(efd, EPOLL_CTL_ADD, buf.fd, &new_event);
 		}
 		else
 		{
 			perror("msgrcv thread");
+			struct msgbuf_new_client buf_new_client;
+			buf_new_client.mtype = MSGBUF_DEL_THREAD_TYPE;
+			if(msgsnd(*(int*)msqid_ptr, &buf_new_client, sizeof(buf_new_client)-sizeof(long), 0) == -1)
+				perror("msgsnd thread");
 			return NULL;
 		}
 	}
 	while(1)
 	{
+		if(size_clients < max_fd)
 		{
 			struct msgbuf_new_client buf;
 			if(msgrcv(*(int*)msqid_ptr, &buf, sizeof(buf)-sizeof(long), MSGBUF_NEW_CLIENT_TYPE, IPC_NOWAIT) != -1)
 			{
-				clients = (struct epoll_event*)realloc(clients, sizeof(struct epoll_event)*(size_clients+1));
-				clients[size_clients].events = EPOLLIN;
-				clients[size_clients].data.fd = buf.fd;
-				epoll_ctl(efd, EPOLL_CTL_ADD, buf.fd, &clients[size_clients]);
+				struct epoll_event new_event;
+				new_event.events = EPOLLIN;
+				new_event.data.fd = buf.fd;	
+				epoll_ctl(efd, EPOLL_CTL_ADD, buf.fd, &new_event);
+				fds[size_clients] = buf.fd;
 				++size_clients;
-				printf("clients: %ld\n", size_clients);
 			}
 			else if(errno != ENOMSG)
 			{
@@ -90,24 +102,18 @@ void* worker(void* msqid_ptr)
 				ssize_t bytes_read = recv(events[i].data.fd, buf, 128, 0);
 				if(bytes_read <= 0)
 				{
-					size_t j;
-					for(j = 0; j < size_clients; ++j)
-						if(clients[j].data.fd == events[i].data.fd)
-							break;
-					epoll_ctl(efd, EPOLL_CTL_DEL, clients[j].data.fd, &clients[j]);
+					epoll_ctl(efd, EPOLL_CTL_DEL, events[i].data.fd, &events[i]);
 					if(close(events[i].data.fd))
 						perror("close");
-					struct epoll_event *temp = (struct epoll_event*) malloc(sizeof(struct epoll_event)*(size_clients-1));
-					size_t t;
-					for(t = 0; t < size_clients-1; ++t)
-						if(t < j)
-							temp[t] = clients[t];
-						else if(t > j)
-							temp[t] = clients[t+1];
 					--size_clients;
-					printf("del clients: %ld\n", size_clients);
-					free(clients);
-					clients = temp;
+					if(size_clients == 0)
+						break;
+					{
+						struct msgbuf_new_client buf_new_client;
+						buf_new_client.mtype = MSGBUF_DEL_CLIENT_TYPE;
+						if(msgsnd(*(int*)msqid_ptr, &buf_new_client, sizeof(buf_new_client)-sizeof(long), 0) == -1)
+							perror("msgsnd");
+					}
 					continue;
 				}
 				if(bytes_read < 4 || strncmp("time", buf, 4) != 0)
@@ -119,6 +125,8 @@ void* worker(void* msqid_ptr)
 					continue;
 				}
 			}
+			if(size_clients == 0)
+				break;
 		}
 		if(exit_flag)
 		{
@@ -127,10 +135,13 @@ void* worker(void* msqid_ptr)
 	}
 	for(size_t i = 0; i < size_clients; ++i)
 	{
-		if(close(clients[i].data.fd) == -1)
+		if(close(fds[i]) == -1)
 			perror("close thread");
 	}
-	free(clients);
+	struct msgbuf_new_client buf_new_client;
+	buf_new_client.mtype = MSGBUF_DEL_THREAD_TYPE;
+	if(msgsnd(*(int*)msqid_ptr, &buf_new_client, sizeof(buf_new_client)-sizeof(long), 0) == -1)
+		perror("msgsnd thread");
 	return NULL;
 }
 
@@ -161,19 +172,51 @@ void* manager(void* msqid_ptr)
 	struct epoll_event events[max_fd];
 	struct epoll_event* clients = NULL;
 	size_t size_clients = 0;
+	size_t all_size_clients = 0; 
 	while(1)
 	{
+		printf("s: %ld\n", all_size_clients);
 		{
 			struct msgbuf_new_client buf;
 			if(msgrcv(*(int*)msqid_ptr, &buf, sizeof(buf)-sizeof(long), MSGBUF_NEED_NEW_THREAD_TYPE, IPC_NOWAIT) != -1)
 			{
-				threads = (pthread_t*)realloc(threads, sizeof(pthread_t)*(size_threads+1));
-				if(pthread_create(&threads[size_threads++], NULL, worker, msqid_ptr) != 0)
+				void* temp = realloc(threads, sizeof(pthread_t)*(size_threads+1));
+				if(temp != 0)
+					threads = (pthread_t*)temp;
+				else
 				{
-					fprintf(stderr, "pthread_create");
+					fprintf(stderr, "realloc failed\n");
 					exit_flag = 1;
 					break;
 				}
+				int ret = pthread_create(&threads[size_threads], NULL, worker, msqid_ptr);
+				if(ret != 0)
+				{
+					fprintf(stderr, "pthread_create %s", strerror(ret));
+					exit_flag = 1;
+					break;
+				}
+				++size_threads;
+			}
+			else if(errno != ENOMSG)
+			{
+				perror("msgrcv");
+				exit_flag = 1;
+				break;
+			}
+			if(msgrcv(*(int*)msqid_ptr, &buf, sizeof(buf)-sizeof(long), MSGBUF_DEL_CLIENT_TYPE, IPC_NOWAIT) != -1)
+			{
+				--all_size_clients;
+			}
+			else if(errno != ENOMSG)
+			{
+				perror("msgrcv");
+				exit_flag = 1;
+				break;
+			}
+			if(msgrcv(*(int*)msqid_ptr, &buf, sizeof(buf)-sizeof(long), MSGBUF_DEL_THREAD_TYPE, IPC_NOWAIT) != -1)
+			{
+				--size_threads;
 			}
 			else if(errno != ENOMSG)
 			{
@@ -217,6 +260,7 @@ void* manager(void* msqid_ptr)
 				else if(events[i].data.fd == tcp_connector_sockfd)
 				{
 					int new_client_sockfd = accept(events[i].data.fd, NULL, NULL);
+					++all_size_clients;
 					if(size_clients < max_fd-2)
 					{
 						if(clients == NULL)
@@ -231,7 +275,6 @@ void* manager(void* msqid_ptr)
 							clients = (struct epoll_event*)realloc(clients, sizeof(struct epoll_event)*(size_clients+1));
 							clients[size_clients].events = EPOLLIN;
 							clients[size_clients++].data.fd = new_client_sockfd;
-							printf("manager clients: %ld\n", size_clients);
 						}
 						epoll_ctl(efd, EPOLL_CTL_ADD, new_client_sockfd, &clients[size_clients-1]);
 					}
@@ -242,9 +285,8 @@ void* manager(void* msqid_ptr)
 						buf_new_client.fd = new_client_sockfd;
 						if(msgsnd(*(int*)msqid_ptr, &buf_new_client, sizeof(buf_new_client)-sizeof(long), 0) == -1)
 							perror("msgsnd");
-						if(a)
+						if(all_size_clients/max_fd >= size_threads)
 						{
-							a = 0;
 							buf_new_client.mtype = MSGBUF_NEED_NEW_THREAD_TYPE;
 							if(msgsnd(*(int*)msqid_ptr, &buf_new_client, sizeof(buf_new_client)-sizeof(long), 0) == -1)
 								perror("msgsnd");
@@ -303,6 +345,7 @@ void* manager(void* msqid_ptr)
 int main(int argc, char* argv[])
 {
 	{
+		//TODO возможно, необходимо снять ограничение на стек.
 		struct rlimit lim;
 
 		// зададим текущий лимит на кол-во открытых дискриптеров
@@ -317,7 +360,7 @@ int main(int argc, char* argv[])
 		}
 	}
 	exit_flag = 0;
-	max_fd = 4;
+	max_fd = 33;
 	udp_sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	tcp_connector_sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if(udp_sockfd == -1 || tcp_connector_sockfd == -1)
@@ -382,21 +425,11 @@ int main(int argc, char* argv[])
 			perror("close");
 		return 1;
 	}
-
-	void* arg = malloc(sizeof(void*)*2);
-	if(arg == NULL)
-	{
-		fprintf(stderr, "Failed to allocate memory\n");
-		if(close(tcp_connector_sockfd) == -1 || close(udp_sockfd) == -1)
-			perror("close");
-		return 1;
-	}
 	
 	pthread_t thread;
 	if(pthread_create(&thread, NULL, manager, &msqid) != 0)
 	{
 		fprintf(stderr, "Failed to create thread\n");
-		free(arg);
 		if(close(tcp_connector_sockfd) == -1 || close(udp_sockfd) == -1)
 			perror("close");
 		return 1;
@@ -405,12 +438,10 @@ int main(int argc, char* argv[])
 	if(pthread_join(thread, NULL) != 0)
 	{
 		fprintf(stderr, "Failed to join thread\n");
-		free(arg);
 		if(close(tcp_connector_sockfd) == -1 || close(udp_sockfd) == -1)
 			perror("close");
 		return 1;
 	}
-	free(arg);	
 	if(close(tcp_connector_sockfd) == -1 || close(udp_sockfd) == -1)
 	{
 		perror("close");

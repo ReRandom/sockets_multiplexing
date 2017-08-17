@@ -12,9 +12,12 @@
 #include <sys/resource.h>
 
 #define REQUEST "time"
+//TODO 1 порт, общий header
 #define SERVER_PORT_UDP 7777
 #define SERVER_PORT_TCP 7778
 #define MY_PORT 13000
+
+#define FD_FOR_THREAD 100
 
 #define GET_TIME(SOCKET, SEND_FUNCTION, SEND_SIZE, RECV_FUNCTION, RECV_SIZE, RET_VAL_PTR) \
 		ssize_t bytes_write = 0; \
@@ -42,15 +45,15 @@
 				tv.tv_sec = 1; \
 				tv.tv_usec = 0; \
 				sel_ret = select(SOCKET+1, &set, NULL, NULL, &tv); \
-		    } \
-		    if(sel_ret == -1) \
-		    { \
-		    	perror("select"); \
+			} \
+			if(sel_ret == -1) \
+			{ \
+				perror("select"); \
 				if(close(SOCKET) == -1) \
 					perror("close"); \
 				*RET_VAL_PTR = 1; \
 				return RET_VAL_PTR; \
-		    } \
+			} \
 		} \
 		{ \
 			ssize_t bytes_read = 0; \
@@ -72,20 +75,27 @@
 struct param
 {
 	int flag_udp;
-	long num;
+	long num; 
 };
 
 void* work(void* arg)
 {
 	int* ret_value = (int*)malloc(sizeof(int));
 	*ret_value = 0;
-	int sock = socket(AF_INET, (((struct param*)arg)->flag_udp)? SOCK_DGRAM : SOCK_STREAM, 0);
-	if(sock == -1)
+	int sock[FD_FOR_THREAD];
+	for(size_t i = 0; i < ((((struct param*)arg)->flag_udp)? 1 : FD_FOR_THREAD); ++i)
 	{
-		printf("%ld", ((struct param*)arg)->num);
-		perror("socket");
-		*ret_value = 1;
-		return ret_value;
+		sock[i] = socket(AF_INET, (((struct param*)arg)->flag_udp)? SOCK_DGRAM : SOCK_STREAM, 0);
+		//printf("desc: %d\n", sock[i]);
+		if(sock[i] == -1)
+		{
+			printf("%ld", ((struct param*)arg)->num);
+			perror("socket");
+			for(size_t j = 0; j < i; ++i)
+				close(sock[i]);
+			*ret_value = 1;
+			return ret_value;
+		}
 	}
 
 	struct sockaddr_in addr;
@@ -101,33 +111,93 @@ void* work(void* arg)
 		addr_my.sin_port = htons(MY_PORT);
 		addr_my.sin_addr.s_addr = htonl(INADDR_ANY);
 
-		if(bind(sock,(struct sockaddr*)&addr_my, sizeof(addr_my)) == -1)
+		if(bind(sock[0],(struct sockaddr*)&addr_my, sizeof(addr_my)) == -1)
 		{
 			printf("%ld", ((struct param*)arg)->num);
 			perror("bind");
 		}
-		GET_TIME(sock, sendto(sock, REQUEST, strlen(REQUEST)+1, 0, (struct sockaddr*)&addr, sizeof(addr)), strlen(REQUEST)+1,
-					recvfrom(sock, &buf, sizeof(buf), 0, NULL, NULL), sizeof(buf), ret_value)
+		GET_TIME(sock[0], sendto(sock[0], REQUEST, strlen(REQUEST)+1, 0, (struct sockaddr*)&addr, sizeof(addr)), strlen(REQUEST)+1,
+					recvfrom(sock[0], &buf, sizeof(buf), 0, NULL, NULL), sizeof(buf), ret_value)
 		struct tm* tim = localtime(&buf);
 		printf("%s\n", asctime(tim));
 	}
 	else
 	{
-		if(connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == -1)
+		for(size_t i = 0; i < FD_FOR_THREAD; ++i)
 		{
-			printf("%ld", ((struct param*)arg)->num);
-			perror("conect");
+			if(connect(sock[i], (struct sockaddr*)&addr, sizeof(addr)) == -1)
+			{
+				printf("%ld", ((struct param*)arg)->num);
+				perror("conect");
+			}
 		}
 		while(1)
 		{
-			GET_TIME(sock, send(sock, REQUEST, strlen(REQUEST)+1, 0), strlen(REQUEST)+1,
-						recv(sock, &buf, sizeof(buf), 0), sizeof(buf), ret_value)
-			struct tm* tim = localtime(&buf);
-			printf("%ld:%s\n", ((struct param*)arg)->num, asctime(tim));
+			for(size_t i = 0; i < FD_FOR_THREAD; ++i)
+			{
+				//GET_TIME(sock[i], send(sock[i], REQUEST, strlen(REQUEST)+1, 0), strlen(REQUEST)+1,
+							//recv(sock[i], &buf, sizeof(buf), 0), sizeof(buf), ret_value)
+				ssize_t bytes_write = 0;
+				while(bytes_write < strlen(REQUEST)+1)
+				{
+					ssize_t ret = send(sock[i], REQUEST, strlen(REQUEST)+1, 0);
+					if(ret == -1)
+					{
+						perror("send function");
+						if(close(sock[i]) == -1)
+							perror("close");
+						*ret_value = 1;
+						return ret_value;
+					}
+					bytes_write += ret;
+				}
+				/* fd set не вмещает большое количество сокетов
+				{
+					int sel_ret = 0;
+					while(sel_ret == 0)
+					{
+						fd_set set;
+						struct timeval tv;
+						FD_ZERO(&set);
+						FD_SET(sock[i], &set);
+						tv.tv_sec = 1;
+						tv.tv_usec = 0;
+						sel_ret = select(sock[i]+1, &set, NULL, NULL, &tv);
+					}
+					if(sel_ret == -1)
+					{
+						perror("select");
+						if(close(sock[i]) == -1)
+							perror("close");
+						*ret_value = 1;
+						return ret_value;
+					}
+				}
+				*/
+				{
+					ssize_t bytes_read = 0;
+					while(bytes_read < sizeof(buf))
+					{
+						ssize_t ret = recv(sock[i], &buf, sizeof(buf), 0);
+						if(ret == -1)
+						{
+							perror("recv function");
+							if(close(sock[i]) == -1)
+								perror("close");
+							*ret_value = 1;
+							return ret_value;
+						}
+						bytes_read += ret;
+					}
+				}
+			//struct tm* tim = localtime(&buf);
+				//printf("%ld:%ld\n", ((struct param*)arg)->num, buf);
+			}
 			sleep(1);
 		}
 	}
-	close(sock);
+	for(size_t i = 0; i < FD_FOR_THREAD; ++i)
+		close(sock[i]);
 	return ret_value;
 }
 
@@ -136,7 +206,6 @@ int main(int argc, char* argv[])
 {
 	{
 		struct rlimit lim;
-
 		// зададим текущий лимит на кол-во открытых дискриптеров
 		lim.rlim_cur = 700000;
 		// зададим максимальный лимит на кол-во открытых дискриптеров
@@ -162,9 +231,19 @@ int main(int argc, char* argv[])
 	{
 		arg[i].flag_udp = udp;
 		arg[i].num = i;
-		pthread_create(&thread[i], NULL, work, &arg[i]);
+		int ret = pthread_create(&thread[i], NULL, work, &arg[i]);
+		if(ret != 0)
+		{
+			fprintf(stderr, "pthread_create %s", strerror(ret));
+			break;
+		}
 	}
+	int* ret;
 	for(long i = 0; i < size; ++i)
-		pthread_join(thread[i],NULL);
+	{
+		int retj = pthread_join(thread[i],(void**)&ret);
+		if(retj != 0)
+			printf("%s", strerror(retj));
+	}
 	
 }
